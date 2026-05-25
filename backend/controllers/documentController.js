@@ -565,6 +565,12 @@ const checkSignature = async (req, res) => {
             document.encrypted_file_name
         );
 
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({
+                message: "Файл документа не найден на сервере. Проверьте ЭЦП у документов, загруженных после публикации приложения."
+            });
+        }
+
         const encryptedData = fs.readFileSync(filePath, "utf8");
 
         const decryptedBytes = CryptoJS.AES.decrypt(
@@ -573,6 +579,13 @@ const checkSignature = async (req, res) => {
         );
 
         const decryptedBase64 = decryptedBytes.toString(CryptoJS.enc.Utf8);
+
+        if (!decryptedBase64) {
+            return res.status(400).json({
+                message: "Не удалось расшифровать документ"
+            });
+        }
+
         const fileBuffer = Buffer.from(decryptedBase64, "base64");
 
         const currentHash = crypto
@@ -596,11 +609,13 @@ const checkSignature = async (req, res) => {
             });
         }
 
-        res.status(409).json({
+        return res.status(409).json({
             message: "ЭЦП недействительна"
         });
 
     } catch (error) {
+        console.error("Ошибка проверки ЭЦП:", error);
+
         res.status(500).json({
             message: "Ошибка проверки ЭЦП",
             error: error.message
