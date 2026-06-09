@@ -7,11 +7,13 @@ function Dashboard() {
     const [documents, setDocuments] = useState([]);
     const [logs, setLogs] = useState([]);
     const [users, setUsers] = useState([]);
+    const [notifications, setNotifications] = useState([]);
 
     const [title, setTitle] = useState("");
     const [file, setFile] = useState(null);
-    const [selectedRecipients, setSelectedRecipients] = useState([]);
-    const [recipientSearch, setRecipientSearch] = useState("");
+    const [selectedReceiverId, setSelectedReceiverId] = useState("");
+    const [receiverSearch, setReceiverSearch] = useState("");
+    const [isReceiverListOpen, setIsReceiverListOpen] = useState(false);
 
     const [newFullName, setNewFullName] = useState("");
     const [newEmail, setNewEmail] = useState("");
@@ -28,40 +30,41 @@ function Dashboard() {
     const [documentSearch, setDocumentSearch] = useState("");
     const [userSearch, setUserSearch] = useState("");
 
-    const [correctionDocument, setCorrectionDocument] = useState(null);
-    const [correctionTitle, setCorrectionTitle] = useState("");
-    const [correctionFile, setCorrectionFile] = useState(null);
-    const [correctionRecipients, setCorrectionRecipients] = useState([]);
-    const [correctionSearch, setCorrectionSearch] = useState("");
-
     const user = JSON.parse(localStorage.getItem("user"));
 
     useEffect(() => {
-    loadDocuments();
-    loadAllUsersForRecipients();
-}, []);
+        loadDocuments();
+        loadRecipients();
+        loadNotifications();
+    }, []);
 
     const getRoleName = (role) => {
         return role === "admin" ? "Администратор" : "Сотрудник";
     };
 
-    const availableRecipients = users.filter((item) => item.id !== user.id);
+    const unreadCount = notifications.filter((item) => !item.is_read).length;
 
-    const filteredRecipients = availableRecipients.filter((item) => {
-        const search = recipientSearch.toLowerCase();
+    const availableReceivers = users.filter((item) => item.id !== user.id);
+
+    const filteredReceivers = availableReceivers.filter((item) => {
+        const search = receiverSearch.toLowerCase();
+
         return (
             item.full_name?.toLowerCase().includes(search) ||
             item.email?.toLowerCase().includes(search)
         );
     });
 
-    const filteredCorrectionRecipients = availableRecipients.filter((item) => {
-        const search = correctionSearch.toLowerCase();
-        return (
-            item.full_name?.toLowerCase().includes(search) ||
-            item.email?.toLowerCase().includes(search)
-        );
-    });
+    const selectedReceiver = users.find(
+        (item) => Number(item.id) === Number(selectedReceiverId)
+    );
+
+    const getStatusBadgeStyle = (status) => {
+        if (status === "Подписан") return styles.signedBadge;
+        if (status === "Просмотрен") return styles.viewedBadge;
+        if (status === "Аннулирован") return styles.cancelledBadge;
+        return styles.processingBadge;
+    };
 
     const filteredDocuments = documents.filter((doc) => {
         const search = documentSearch.toLowerCase();
@@ -69,19 +72,25 @@ function Dashboard() {
         const matchesSearch =
             doc.title?.toLowerCase().includes(search) ||
             doc.full_name?.toLowerCase().includes(search) ||
+            doc.author_name?.toLowerCase().includes(search) ||
+            doc.receiver_name?.toLowerCase().includes(search) ||
             doc.file_name?.toLowerCase().includes(search) ||
-            doc.recipients_names?.toLowerCase().includes(search);
+            doc.status?.toLowerCase().includes(search);
+
+        if (documentFilter === "processing") {
+            return doc.status === "В обработке" && matchesSearch;
+        }
+
+        if (documentFilter === "viewed") {
+            return doc.status === "Просмотрен" && matchesSearch;
+        }
 
         if (documentFilter === "signed") {
-            return doc.signature_hash && matchesSearch;
+            return doc.status === "Подписан" && matchesSearch;
         }
 
-        if (documentFilter === "notSigned") {
-            return !doc.signature_hash && matchesSearch;
-        }
-
-        if (documentFilter === "corrections") {
-            return doc.correction_of && matchesSearch;
+        if (documentFilter === "cancelled") {
+            return doc.status === "Аннулирован" && matchesSearch;
         }
 
         return matchesSearch;
@@ -97,27 +106,26 @@ function Dashboard() {
         );
     });
 
+    const validateName = (name) => {
+        return /^[А-Яа-яЁёA-Za-z\s-]+$/.test(name.trim());
+    };
+
+    const validateEmail = (email) => {
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+    };
+
     const loadDocuments = async () => {
         try {
             const response = await api.get("/documents");
             setDocuments(response.data);
-        } catch {
-            alert("Ошибка загрузки документов");
+        } catch (error) {
+            alert(error.response?.data?.message || "Ошибка загрузки документов");
         }
     };
 
-    const loadAllUsersForRecipients = async () => {
-    try {
-        const response = await api.get("/auth/recipients");
-        setUsers(response.data);
-    } catch (error) {
-        console.log("Ошибка загрузки получателей:", error);
-    }
-};
-
-    const loadUsersForRecipients = async () => {
+    const loadRecipients = async () => {
         try {
-            const response = await api.get("/auth/users");
+            const response = await api.get("/auth/recipients");
             setUsers(response.data);
         } catch {
             setUsers([]);
@@ -144,26 +152,44 @@ function Dashboard() {
         }
     };
 
+    const loadNotifications = async () => {
+        try {
+            const response = await api.get("/documents/notifications");
+            setNotifications(response.data);
+        } catch (error) {
+            console.log("Ошибка загрузки уведомлений:", error);
+        }
+    };
+
     const openDocuments = () => {
         loadDocuments();
+        loadNotifications();
         setActiveSection("documents");
     };
 
-    const toggleRecipient = (id) => {
-        setSelectedRecipients((prev) =>
-            prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
-        );
-    };
-
-    const toggleCorrectionRecipient = (id) => {
-        setCorrectionRecipients((prev) =>
-            prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
-        );
+    const openNotifications = async () => {
+        try {
+            setActiveSection("notifications");
+            await api.post("/documents/notifications/read");
+            await loadNotifications();
+        } catch (error) {
+            alert(error.response?.data?.message || "Ошибка открытия уведомлений");
+        }
     };
 
     const createUser = async () => {
         if (!newFullName || !newEmail || !newPassword) {
             alert("Заполните ФИО, email и пароль");
+            return;
+        }
+
+        if (!validateName(newFullName)) {
+            alert("ФИО должно содержать только буквы, пробелы и дефис");
+            return;
+        }
+
+        if (!validateEmail(newEmail)) {
+            alert("Введите корректный email");
             return;
         }
 
@@ -183,6 +209,7 @@ function Dashboard() {
             setNewRole("employee");
 
             loadUsers();
+            loadRecipients();
         } catch (error) {
             alert(error.response?.data?.message || "Ошибка создания пользователя");
         }
@@ -210,6 +237,16 @@ function Dashboard() {
             return;
         }
 
+        if (!validateName(editFullName)) {
+            alert("ФИО должно содержать только буквы, пробелы и дефис");
+            return;
+        }
+
+        if (!validateEmail(editEmail)) {
+            alert("Введите корректный email");
+            return;
+        }
+
         try {
             await api.put(`/auth/users/${editUserId}`, {
                 full_name: editFullName,
@@ -222,6 +259,7 @@ function Dashboard() {
 
             cancelEditUser();
             loadUsers();
+            loadRecipients();
         } catch (error) {
             alert(error.response?.data?.message || "Ошибка редактирования пользователя");
         }
@@ -235,39 +273,62 @@ function Dashboard() {
 
             alert("Пользователь удалён");
             loadUsers();
+            loadRecipients();
         } catch (error) {
             alert(error.response?.data?.message || "Ошибка удаления пользователя");
         }
     };
 
     const uploadDocument = async () => {
-        if (!title || !file) {
-            alert("Введите название и выберите файл");
+        if (!title || !file || !selectedReceiverId) {
+            alert("Введите название, выберите файл и одного получателя");
             return;
         }
 
         const formData = new FormData();
+
         formData.append("title", title);
         formData.append("document", file);
-        formData.append("recipients", JSON.stringify(selectedRecipients));
+        formData.append("receiver_id", selectedReceiverId);
 
         try {
             await api.post("/documents/upload", formData);
 
-            alert("Документ загружен, зашифрован и отправлен получателям");
+            alert("Документ подписан отправителем и отправлен получателю");
+
             setTitle("");
             setFile(null);
-            setSelectedRecipients([]);
-            setRecipientSearch("");
+            setSelectedReceiverId("");
+            setReceiverSearch("");
+            setIsReceiverListOpen(false);
+
             loadDocuments();
+            loadNotifications();
         } catch (error) {
             alert(error.response?.data?.message || "Ошибка загрузки документа");
         }
     };
 
-    const downloadDocument = async (id, fileName) => {
+    const markViewed = async (doc) => {
+        if (
+            Number(doc.receiver_id) === Number(user.id) &&
+            doc.status === "В обработке"
+        ) {
+            try {
+                await api.post(`/documents/view/${doc.id}`);
+                await loadDocuments();
+                await loadNotifications();
+            } catch (error) {
+                console.log("Ошибка изменения статуса просмотра:", error);
+            }
+        }
+    };
+
+    const downloadDocument = async (doc) => {
         try {
-            const response = await api.get(`/documents/download/${id}`, {
+            await markViewed(doc);
+
+            const response = await api.get(`/documents/download/${doc.id}`, {
                 responseType: "blob"
             });
 
@@ -275,7 +336,7 @@ function Dashboard() {
             const link = document.createElement("a");
 
             link.href = url;
-            link.download = fileName || "document";
+            link.download = doc.file_name || "document";
             document.body.appendChild(link);
             link.click();
             link.remove();
@@ -291,6 +352,7 @@ function Dashboard() {
             const response = await api.post(`/documents/sign/${id}`);
             alert(response.data.message);
             loadDocuments();
+            loadNotifications();
         } catch (error) {
             alert(error.response?.data?.message || "Ошибка создания электронной подписи");
         }
@@ -299,15 +361,29 @@ function Dashboard() {
     const checkSignature = async (id) => {
         try {
             const response = await api.get(`/documents/check-sign/${id}`);
-            alert(response.data.message);
+
+            const senderText = response.data.senderValid
+                ? "ЭЦП отправителя действительна"
+                : "ЭЦП отправителя недействительна";
+
+            const receiverText =
+                response.data.receiverValid === null
+                    ? "ЭЦП получателя ещё нет"
+                    : response.data.receiverValid
+                        ? "ЭЦП получателя действительна"
+                        : "ЭЦП получателя недействительна";
+
+            alert(`${response.data.message}\n${senderText}\n${receiverText}`);
         } catch (error) {
             alert(error.response?.data?.message || "Ошибка проверки ЭЦП");
         }
     };
 
-    const viewStampedDocument = async (id) => {
+    const viewStampedDocument = async (doc) => {
         try {
-            const response = await api.get(`/documents/stamped/${id}`, {
+            await markViewed(doc);
+
+            const response = await api.get(`/documents/stamped/${doc.id}`, {
                 responseType: "text"
             });
 
@@ -331,6 +407,19 @@ function Dashboard() {
         }
     };
 
+    const cancelDocument = async (id) => {
+        if (!confirm("Аннулировать документ?")) return;
+
+        try {
+            const response = await api.post(`/documents/cancel/${id}`);
+            alert(response.data.message);
+            loadDocuments();
+            loadNotifications();
+        } catch (error) {
+            alert(error.response?.data?.message || "Ошибка аннулирования документа");
+        }
+    };
+
     const deleteDocument = async (id) => {
         if (!confirm("Удалить документ?")) return;
 
@@ -343,41 +432,40 @@ function Dashboard() {
         }
     };
 
-    const openCorrectionModal = (doc) => {
-        setCorrectionDocument(doc);
-        setCorrectionTitle(`Исправление к документу: ${doc.title}`);
-        setCorrectionFile(null);
-        setCorrectionRecipients([]);
-        setCorrectionSearch("");
+    const canSenderSign = (doc) => {
+        return (
+            Number(doc.uploaded_by) === Number(user.id) &&
+            doc.status !== "Аннулирован" &&
+            !doc.sender_signature_hash
+        );
     };
 
-    const closeCorrectionModal = () => {
-        setCorrectionDocument(null);
-        setCorrectionTitle("");
-        setCorrectionFile(null);
-        setCorrectionRecipients([]);
-        setCorrectionSearch("");
+    const canReceiverSign = (doc) => {
+        return (
+            Number(doc.receiver_id) === Number(user.id) &&
+            doc.status !== "Аннулирован" &&
+            doc.status !== "Подписан" &&
+            doc.sender_signature_hash &&
+            !doc.receiver_signature_hash
+        );
     };
 
-    const createCorrection = async () => {
-        if (!correctionDocument || !correctionTitle || !correctionFile) {
-            alert("Введите название исправления и выберите файл");
-            return;
-        }
+    const canCancel = (doc) => {
+        return (
+            doc.status !== "Аннулирован" &&
+            (user.role === "admin" ||
+                Number(doc.uploaded_by) === Number(user.id) ||
+                Number(doc.receiver_id) === Number(user.id))
+        );
+    };
 
-        const formData = new FormData();
-        formData.append("title", correctionTitle);
-        formData.append("document", correctionFile);
-        formData.append("recipients", JSON.stringify(correctionRecipients));
-
-        try {
-            await api.post(`/documents/correction/${correctionDocument.id}`, formData);
-            alert("Исправление создано как отдельный документ");
-            closeCorrectionModal();
-            loadDocuments();
-        } catch (error) {
-            alert(error.response?.data?.message || "Ошибка создания исправления");
-        }
+    const canDelete = (doc) => {
+        return (
+            doc.status !== "Подписан" &&
+            doc.status !== "Аннулирован" &&
+            (user.role === "admin" ||
+                Number(doc.uploaded_by) === Number(user.id))
+        );
     };
 
     const logout = () => {
@@ -396,6 +484,13 @@ function Dashboard() {
 
                 <div style={styles.headerActions}>
                     <button style={styles.navButton} onClick={openDocuments}>Документы</button>
+
+                    <button style={styles.navButtonWithBadge} onClick={openNotifications}>
+                        Уведомления
+                        {unreadCount > 0 && (
+                            <span style={styles.badge}>{unreadCount}</span>
+                        )}
+                    </button>
 
                     {user.role === "admin" && (
                         <>
@@ -433,31 +528,62 @@ function Dashboard() {
                             />
 
                             <button style={styles.addButton} onClick={uploadDocument}>
-                                Загрузить документ
+                                Подписать и отправить
                             </button>
                         </div>
 
-                        <div style={styles.recipientsBox}>
-                            <h3 style={styles.smallTitle}>Получатели документа</h3>
+                        <div style={styles.receiverBox}>
+                            <h3 style={styles.smallTitle}>Получатель документа</h3>
 
-                            <input
-                                style={styles.searchInput}
-                                placeholder="Поиск получателя по ФИО или email..."
-                                value={recipientSearch}
-                                onChange={(e) => setRecipientSearch(e.target.value)}
-                            />
+                            <div style={styles.receiverSelector}>
+                                <input
+                                    style={styles.searchInput}
+                                    placeholder="Начните вводить ФИО или email получателя..."
+                                    value={
+                                        isReceiverListOpen
+                                            ? receiverSearch
+                                            : selectedReceiver
+                                                ? `${selectedReceiver.full_name} — ${selectedReceiver.email}`
+                                                : receiverSearch
+                                    }
+                                    onFocus={() => {
+                                        setIsReceiverListOpen(true);
 
-                            <div style={styles.checkList}>
-                                {filteredRecipients.map((item) => (
-                                    <label key={item.id} style={styles.checkItem}>
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedRecipients.includes(item.id)}
-                                            onChange={() => toggleRecipient(item.id)}
-                                        />
-                                        <span>{item.full_name} — {item.email}</span>
-                                    </label>
-                                ))}
+                                        if (selectedReceiver) {
+                                            setReceiverSearch("");
+                                        }
+                                    }}
+                                    onChange={(e) => {
+                                        setReceiverSearch(e.target.value);
+                                        setSelectedReceiverId("");
+                                        setIsReceiverListOpen(true);
+                                    }}
+                                />
+
+                                {isReceiverListOpen && (
+                                    <div style={styles.dropdown}>
+                                        {filteredReceivers.length > 0 ? (
+                                            filteredReceivers.map((item) => (
+                                                <div
+                                                    key={item.id}
+                                                    style={styles.dropdownItem}
+                                                    onClick={() => {
+                                                        setSelectedReceiverId(item.id);
+                                                        setReceiverSearch("");
+                                                        setIsReceiverListOpen(false);
+                                                    }}
+                                                >
+                                                    <b>{item.full_name}</b>
+                                                    <span> — {item.email}</span>
+                                                </div>
+                                            ))
+                                        ) : (
+                                            <div style={styles.dropdownEmpty}>
+                                                Получатели не найдены
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -467,24 +593,10 @@ function Dashboard() {
 
                         <input
                             style={styles.searchInput}
-                            placeholder="Поиск по документам, автору, получателю или имени файла..."
+                            placeholder="Поиск по документам, автору, получателю или статусу..."
                             value={documentSearch}
                             onChange={(e) => setDocumentSearch(e.target.value)}
                         />
-
-                        {documentSearch && (
-                            <div style={styles.suggestions}>
-                                {filteredDocuments.slice(0, 5).map((doc) => (
-                                    <div
-                                        key={doc.id}
-                                        style={styles.suggestionItem}
-                                        onClick={() => setDocumentSearch(doc.title)}
-                                    >
-                                        {doc.title} — {doc.full_name}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
 
                         <div style={styles.filterBox}>
                             <button
@@ -495,24 +607,31 @@ function Dashboard() {
                             </button>
 
                             <button
+                                style={documentFilter === "processing" ? styles.activeFilterButton : styles.filterButton}
+                                onClick={() => setDocumentFilter("processing")}
+                            >
+                                В обработке
+                            </button>
+
+                            <button
+                                style={documentFilter === "viewed" ? styles.activeFilterButton : styles.filterButton}
+                                onClick={() => setDocumentFilter("viewed")}
+                            >
+                                Просмотренные
+                            </button>
+
+                            <button
                                 style={documentFilter === "signed" ? styles.activeFilterButton : styles.filterButton}
                                 onClick={() => setDocumentFilter("signed")}
                             >
-                                Подписанные ЭЦП
+                                Подписанные
                             </button>
 
                             <button
-                                style={documentFilter === "notSigned" ? styles.activeFilterButton : styles.filterButton}
-                                onClick={() => setDocumentFilter("notSigned")}
+                                style={documentFilter === "cancelled" ? styles.activeFilterButton : styles.filterButton}
+                                onClick={() => setDocumentFilter("cancelled")}
                             >
-                                Не подписанные
-                            </button>
-
-                            <button
-                                style={documentFilter === "corrections" ? styles.activeFilterButton : styles.filterButton}
-                                onClick={() => setDocumentFilter("corrections")}
-                            >
-                                Исправления
+                                Аннулированные
                             </button>
                         </div>
 
@@ -520,11 +639,12 @@ function Dashboard() {
                             <thead>
                                 <tr>
                                     <th style={styles.th}>Название</th>
-                                    <th style={styles.th}>Автор</th>
-                                    <th style={styles.th}>Получатели</th>
-                                    <th style={styles.th}>Дата загрузки</th>
+                                    <th style={styles.th}>Отправитель</th>
+                                    <th style={styles.th}>Получатель</th>
+                                    <th style={styles.th}>Дата</th>
                                     <th style={styles.th}>Статус</th>
-                                    <th style={styles.th}>Подписал</th>
+                                    <th style={styles.th}>ЭЦП отправителя</th>
+                                    <th style={styles.th}>ЭЦП получателя</th>
                                     <th style={styles.th}>Действия</th>
                                 </tr>
                             </thead>
@@ -532,51 +652,52 @@ function Dashboard() {
                             <tbody>
                                 {filteredDocuments.map((doc) => (
                                     <tr key={doc.id}>
-                                        <td style={styles.td}>
-                                            {doc.title}
-                                            {doc.correction_of && (
-                                                <div style={styles.correctionLabel}>Исправление</div>
-                                            )}
-                                        </td>
-                                        <td style={styles.td}>{doc.full_name}</td>
-                                        <td style={styles.td}>{doc.recipients_names || "—"}</td>
+                                        <td style={styles.td}>{doc.title}</td>
+                                        <td style={styles.td}>{doc.author_name || doc.full_name || "—"}</td>
+                                        <td style={styles.td}>{doc.receiver_name || "—"}</td>
                                         <td style={styles.td}>{new Date(doc.created_at).toLocaleString()}</td>
 
                                         <td style={styles.td}>
-                                            {doc.signature_hash ? (
-                                                <span style={styles.signedBadge}>Подписан ЭЦП</span>
-                                            ) : (
-                                                <span style={styles.notSignedBadge}>Не подписан</span>
-                                            )}
+                                            <span style={getStatusBadgeStyle(doc.status)}>
+                                                {doc.status || "В обработке"}
+                                            </span>
                                         </td>
 
-                                        <td style={styles.td}>{doc.signed_user_name || "—"}</td>
+                                        <td style={styles.td}>{doc.sender_signed_name || "—"}</td>
+                                        <td style={styles.td}>{doc.receiver_signed_name || "—"}</td>
 
                                         <td style={styles.td}>
                                             <button
                                                 style={styles.actionButton}
-                                                onClick={() => downloadDocument(doc.id, doc.file_name)}
+                                                onClick={() => downloadDocument(doc)}
                                             >
                                                 Скачать
                                             </button>
 
-                                            {!doc.signature_hash && (
+                                            {canSenderSign(doc) && (
                                                 <button
                                                     style={styles.actionButton}
                                                     onClick={() => signDocument(doc.id)}
                                                 >
-                                                    Подписать ЭЦП
+                                                    Подписать отправителем
                                                 </button>
                                             )}
 
-                                            {doc.signature_hash && (
+                                            {canReceiverSign(doc) && (
                                                 <button
                                                     style={styles.actionButton}
-                                                    onClick={() => viewStampedDocument(doc.id)}
+                                                    onClick={() => signDocument(doc.id)}
                                                 >
-                                                    Просмотреть ЭЦП
+                                                    Подписать получателем
                                                 </button>
                                             )}
+
+                                            <button
+                                                style={styles.actionButton}
+                                                onClick={() => viewStampedDocument(doc)}
+                                            >
+                                                Просмотреть ЭЦП
+                                            </button>
 
                                             <button
                                                 style={styles.actionButton}
@@ -585,16 +706,16 @@ function Dashboard() {
                                                 Проверить ЭЦП
                                             </button>
 
-                                            {doc.signature_hash && (
+                                            {canCancel(doc) && (
                                                 <button
-                                                    style={styles.actionButton}
-                                                    onClick={() => openCorrectionModal(doc)}
+                                                    style={styles.cancelDocumentButton}
+                                                    onClick={() => cancelDocument(doc.id)}
                                                 >
-                                                    Создать исправление
+                                                    Аннулировать
                                                 </button>
                                             )}
 
-                                            {!doc.signature_hash && (
+                                            {canDelete(doc) && (
                                                 <button
                                                     style={styles.deleteButton}
                                                     onClick={() => deleteDocument(doc.id)}
@@ -613,6 +734,26 @@ function Dashboard() {
                         )}
                     </div>
                 </>
+            )}
+
+            {activeSection === "notifications" && (
+                <div style={styles.card}>
+                    <h2 style={styles.sectionTitle}>Уведомления</h2>
+
+                    {notifications.length === 0 && (
+                        <p style={styles.empty}>Уведомлений пока нет</p>
+                    )}
+
+                    {notifications.map((item) => (
+                        <div
+                            key={item.id}
+                            style={item.is_read ? styles.notificationItem : styles.notificationUnread}
+                        >
+                            <div>{item.message}</div>
+                            <small>{new Date(item.created_at).toLocaleString()}</small>
+                        </div>
+                    ))}
+                </div>
             )}
 
             {activeSection === "users" && user.role === "admin" && (
@@ -778,57 +919,6 @@ function Dashboard() {
                     )}
                 </div>
             )}
-
-            {correctionDocument && (
-                <div style={styles.modalOverlay}>
-                    <div style={styles.modal}>
-                        <h2 style={styles.sectionTitle}>Создание исправления</h2>
-                        <p style={styles.modalText}>
-                            Исправление создаётся как отдельный документ к подписанному ЭЦП документу: <b>{correctionDocument.title}</b>
-                        </p>
-
-                        <input
-                            style={styles.inputFull}
-                            placeholder="Название исправления"
-                            value={correctionTitle}
-                            onChange={(e) => setCorrectionTitle(e.target.value)}
-                        />
-
-                        <input
-                            type="file"
-                            style={styles.inputFull}
-                            onChange={(e) => setCorrectionFile(e.target.files[0])}
-                        />
-
-                        <h3 style={styles.smallTitle}>Получатели исправления</h3>
-
-                        <input
-                            style={styles.searchInput}
-                            placeholder="Поиск получателя..."
-                            value={correctionSearch}
-                            onChange={(e) => setCorrectionSearch(e.target.value)}
-                        />
-
-                        <div style={styles.checkList}>
-                            {filteredCorrectionRecipients.map((item) => (
-                                <label key={item.id} style={styles.checkItem}>
-                                    <input
-                                        type="checkbox"
-                                        checked={correctionRecipients.includes(item.id)}
-                                        onChange={() => toggleCorrectionRecipient(item.id)}
-                                    />
-                                    <span>{item.full_name} — {item.email}</span>
-                                </label>
-                            ))}
-                        </div>
-
-                        <div style={styles.modalActions}>
-                            <button style={styles.addButton} onClick={createCorrection}>Создать исправление</button>
-                            <button style={styles.cancelButton} onClick={closeCorrectionModal}>Отмена</button>
-                        </div>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }
@@ -862,7 +952,8 @@ const styles = {
     headerActions: {
         display: "flex",
         alignItems: "center",
-        gap: "12px"
+        gap: "12px",
+        flexWrap: "wrap"
     },
 
     userCard: {
@@ -924,39 +1015,17 @@ const styles = {
         fontSize: "14px"
     },
 
-    inputFull: {
-        width: "100%",
-        padding: "11px",
-        borderRadius: "10px",
-        border: "1px solid #d1d5db",
-        fontSize: "14px",
-        marginBottom: "12px"
-    },
-
     searchInput: {
         width: "100%",
         padding: "12px",
         marginBottom: "10px",
         borderRadius: "10px",
         border: "1px solid #d1d5db",
-        fontSize: "14px"
+        fontSize: "14px",
+        boxSizing: "border-box"
     },
 
-    suggestions: {
-        background: "white",
-        border: "1px solid #d1d5db",
-        borderRadius: "10px",
-        marginBottom: "18px",
-        overflow: "hidden"
-    },
-
-    suggestionItem: {
-        padding: "10px 12px",
-        cursor: "pointer",
-        borderBottom: "1px solid #e5e7eb"
-    },
-
-    recipientsBox: {
+    receiverBox: {
         marginTop: "18px",
         padding: "18px",
         borderRadius: "14px",
@@ -964,23 +1033,33 @@ const styles = {
         border: "1px solid #e5e7eb"
     },
 
-    checkList: {
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-        gap: "10px",
-        maxHeight: "180px",
+    receiverSelector: {
+        position: "relative"
+    },
+
+    dropdown: {
+        position: "absolute",
+        top: "52px",
+        left: 0,
+        right: 0,
+        background: "white",
+        border: "1px solid #d1d5db",
+        borderRadius: "10px",
+        boxShadow: "0 10px 20px rgba(0,0,0,0.12)",
+        zIndex: 20,
+        maxHeight: "220px",
         overflowY: "auto"
     },
 
-    checkItem: {
-        display: "flex",
-        alignItems: "center",
-        gap: "8px",
-        padding: "10px",
-        borderRadius: "10px",
-        background: "white",
-        border: "1px solid #e5e7eb",
-        cursor: "pointer"
+    dropdownItem: {
+        padding: "12px",
+        cursor: "pointer",
+        borderBottom: "1px solid #e5e7eb"
+    },
+
+    dropdownEmpty: {
+        padding: "12px",
+        color: "#6b7280"
     },
 
     filterBox: {
@@ -1039,6 +1118,33 @@ const styles = {
         fontSize: "14px"
     },
 
+    navButtonWithBadge: {
+        position: "relative",
+        background: "#111827",
+        color: "white",
+        border: "none",
+        padding: "12px 18px",
+        borderRadius: "10px",
+        cursor: "pointer",
+        fontSize: "14px"
+    },
+
+    badge: {
+        position: "absolute",
+        top: "-8px",
+        right: "-8px",
+        background: "#ef4444",
+        color: "white",
+        width: "22px",
+        height: "22px",
+        borderRadius: "50%",
+        fontSize: "12px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontWeight: "bold"
+    },
+
     logoutButton: {
         background: "#6b7280",
         color: "white",
@@ -1078,6 +1184,17 @@ const styles = {
         cursor: "pointer"
     },
 
+    cancelDocumentButton: {
+        marginRight: "8px",
+        marginBottom: "6px",
+        padding: "8px 12px",
+        border: "none",
+        borderRadius: "8px",
+        background: "#ffedd5",
+        color: "#c2410c",
+        cursor: "pointer"
+    },
+
     deleteButton: {
         padding: "8px 12px",
         border: "none",
@@ -1097,7 +1214,17 @@ const styles = {
         fontWeight: "bold"
     },
 
-    notSignedBadge: {
+    viewedBadge: {
+        display: "inline-block",
+        padding: "6px 10px",
+        borderRadius: "8px",
+        background: "#dbeafe",
+        color: "#1d4ed8",
+        fontSize: "13px",
+        fontWeight: "bold"
+    },
+
+    processingBadge: {
         display: "inline-block",
         padding: "6px 10px",
         borderRadius: "8px",
@@ -1107,10 +1234,30 @@ const styles = {
         fontWeight: "bold"
     },
 
-    correctionLabel: {
-        marginTop: "6px",
-        color: "#7c3aed",
-        fontSize: "12px",
+    cancelledBadge: {
+        display: "inline-block",
+        padding: "6px 10px",
+        borderRadius: "8px",
+        background: "#fee2e2",
+        color: "#991b1b",
+        fontSize: "13px",
+        fontWeight: "bold"
+    },
+
+    notificationItem: {
+        padding: "14px",
+        border: "1px solid #e5e7eb",
+        borderRadius: "12px",
+        marginBottom: "10px",
+        background: "#f9fafb"
+    },
+
+    notificationUnread: {
+        padding: "14px",
+        border: "1px solid #bfdbfe",
+        borderRadius: "12px",
+        marginBottom: "10px",
+        background: "#eff6ff",
         fontWeight: "bold"
     },
 
@@ -1118,40 +1265,6 @@ const styles = {
         textAlign: "center",
         marginTop: "25px",
         color: "#6b7280"
-    },
-
-    modalOverlay: {
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        background: "rgba(0,0,0,0.45)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000
-    },
-
-    modal: {
-        background: "white",
-        padding: "28px",
-        borderRadius: "18px",
-        width: "700px",
-        maxHeight: "90vh",
-        overflowY: "auto",
-        boxShadow: "0 20px 40px rgba(0,0,0,0.25)"
-    },
-
-    modalText: {
-        color: "#4b5563",
-        marginBottom: "18px"
-    },
-
-    modalActions: {
-        marginTop: "18px",
-        display: "flex",
-        gap: "10px"
     }
 };
 
