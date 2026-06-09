@@ -358,26 +358,6 @@ function Dashboard() {
         }
     };
 
-    const checkSignature = async (id) => {
-        try {
-            const response = await api.get(`/documents/check-sign/${id}`);
-
-            const senderText = response.data.senderValid
-                ? "ЭЦП отправителя действительна"
-                : "ЭЦП отправителя недействительна";
-
-            const receiverText =
-                response.data.receiverValid === null
-                    ? "ЭЦП получателя ещё нет"
-                    : response.data.receiverValid
-                        ? "ЭЦП получателя действительна"
-                        : "ЭЦП получателя недействительна";
-
-            alert(`${response.data.message}\n${senderText}\n${receiverText}`);
-        } catch (error) {
-            alert(error.response?.data?.message || "Ошибка проверки ЭЦП");
-        }
-    };
 
     const viewStampedDocument = async (doc) => {
         try {
@@ -417,18 +397,6 @@ function Dashboard() {
             loadNotifications();
         } catch (error) {
             alert(error.response?.data?.message || "Ошибка аннулирования документа");
-        }
-    };
-
-    const deleteDocument = async (id) => {
-        if (!confirm("Удалить документ?")) return;
-
-        try {
-            await api.delete(`/documents/${id}`);
-            alert("Документ удалён");
-            loadDocuments();
-        } catch (error) {
-            alert(error.response?.data?.message || "Ошибка удаления документа");
         }
     };
 
@@ -699,13 +667,6 @@ function Dashboard() {
                                                 Просмотреть ЭЦП
                                             </button>
 
-                                            <button
-                                                style={styles.actionButton}
-                                                onClick={() => checkSignature(doc.id)}
-                                            >
-                                                Проверить ЭЦП
-                                            </button>
-
                                             {canCancel(doc) && (
                                                 <button
                                                     style={styles.cancelDocumentButton}
@@ -715,14 +676,6 @@ function Dashboard() {
                                                 </button>
                                             )}
 
-                                            {canDelete(doc) && (
-                                                <button
-                                                    style={styles.deleteButton}
-                                                    onClick={() => deleteDocument(doc.id)}
-                                                >
-                                                    Удалить
-                                                </button>
-                                            )}
                                         </td>
                                     </tr>
                                 ))}
