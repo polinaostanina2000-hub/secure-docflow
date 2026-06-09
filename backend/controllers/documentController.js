@@ -804,7 +804,8 @@ const viewStampedDocument = async (req, res) => {
         <html lang="ru">
         <head>
             <meta charset="UTF-8">
-            <title>Документ с электронными подписями</title>
+           <link rel="icon" type="image/x-icon" href="https://secure-docflow.vercel.app/icon.ico">
+<title>ЭЦП документа</title>
             <style>
                 body {
                     font-family: Arial, sans-serif;
