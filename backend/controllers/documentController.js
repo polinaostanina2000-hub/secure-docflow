@@ -12,31 +12,99 @@ const getOriginalFileName = (fileName) => {
     }
 };
 
-const parseRecipients = (recipients) => {
-    if (!recipients) return [];
-
-    try {
-        const parsed = JSON.parse(recipients);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
+const checkDocumentAccess = (document, user) => {
+    if (!document || !user) return false;
+    if (user.role === "admin") return true;
+    if (Number(document.uploaded_by) === Number(user.id)) return true;
+    if (Number(document.receiver_id) === Number(user.id)) return true;
+    return false;
 };
 
-const checkDocumentAccess = async (documentId, userId, role, uploadedBy) => {
-    if (role === "admin") return true;
-    if (uploadedBy === userId) return true;
+const createNotification = async (userId, documentId, message) => {
+    if (!userId) return;
 
-    const [recipients] = await db.query(
+    await db.query(
         `
-        SELECT id 
-        FROM document_recipients 
-        WHERE document_id = ? AND user_id = ?
+        INSERT INTO notifications (user_id, document_id, message, is_read)
+        VALUES (?, ?, ?, 0)
         `,
-        [documentId, userId]
+        [userId, documentId || null, message]
+    );
+};
+
+const getDocumentById = async (documentId) => {
+    const [documents] = await db.query(
+        `
+        SELECT 
+            documents.*,
+
+            authors.full_name AS author_name,
+            authors.email AS author_email,
+
+            receivers.full_name AS receiver_name,
+            receivers.email AS receiver_email,
+
+            senderUser.full_name AS sender_signed_name,
+            receiverUser.full_name AS receiver_signed_name,
+
+            cancelUser.full_name AS cancelled_user_name
+        FROM documents
+        LEFT JOIN users AS authors
+            ON documents.uploaded_by = authors.id
+        LEFT JOIN users AS receivers
+            ON documents.receiver_id = receivers.id
+        LEFT JOIN users AS senderUser
+            ON documents.sender_signed_by = senderUser.id
+        LEFT JOIN users AS receiverUser
+            ON documents.receiver_signed_by = receiverUser.id
+        LEFT JOIN users AS cancelUser
+            ON documents.cancelled_by = cancelUser.id
+        WHERE documents.id = ?
+        `,
+        [documentId]
     );
 
-    return recipients.length > 0;
+    return documents[0];
+};
+
+const readAndDecryptFile = (document) => {
+    const filePath = path.join(
+        __dirname,
+        "../uploads",
+        document.encrypted_file_name
+    );
+
+    if (!fs.existsSync(filePath)) {
+        return {
+            error: "Файл документа не найден на сервере"
+        };
+    }
+
+    const encryptedData = fs.readFileSync(filePath, "utf8");
+
+    const decryptedBytes = CryptoJS.AES.decrypt(
+        encryptedData,
+        process.env.AES_SECRET_KEY
+    );
+
+    const decryptedBase64 = decryptedBytes.toString(CryptoJS.enc.Utf8);
+
+    if (!decryptedBase64) {
+        return {
+            error: "Не удалось расшифровать документ"
+        };
+    }
+
+    return {
+        buffer: Buffer.from(decryptedBase64, "base64")
+    };
+};
+
+const getHashFromBuffer = (buffer) => {
+    return crypto
+        .createHash("sha256")
+        .update(buffer)
+        .digest("hex");
 };
 
 const uploadDocument = async (req, res) => {
@@ -49,23 +117,41 @@ const uploadDocument = async (req, res) => {
             });
         }
 
-        const { title, recipients } = req.body;
+        const { title, receiver_id } = req.body;
 
-        if (!title) {
+        if (!title || !title.trim()) {
             return res.status(400).json({
                 message: "Введите название документа"
             });
         }
 
-        const recipientIds = parseRecipients(recipients);
+        if (!receiver_id) {
+            return res.status(400).json({
+                message: "Выберите одного получателя документа"
+            });
+        }
+
+        if (Number(receiver_id) === Number(req.user.id)) {
+            return res.status(400).json({
+                message: "Нельзя отправить документ самому себе"
+            });
+        }
+
+        const [receivers] = await db.query(
+            "SELECT id, full_name FROM users WHERE id = ?",
+            [receiver_id]
+        );
+
+        if (receivers.length === 0) {
+            return res.status(404).json({
+                message: "Получатель не найден"
+            });
+        }
 
         const filePath = path.join(__dirname, "../uploads", file.filename);
         const fileBuffer = fs.readFileSync(filePath);
 
-        const fileHash = crypto
-            .createHash("sha256")
-            .update(fileBuffer)
-            .digest("hex");
+        const fileHash = getHashFromBuffer(fileBuffer);
 
         const encryptedData = CryptoJS.AES.encrypt(
             fileBuffer.toString("base64"),
@@ -79,41 +165,56 @@ const uploadDocument = async (req, res) => {
         const [insertResult] = await db.query(
             `
             INSERT INTO documents
-            (title, file_name, encrypted_file_name, file_hash, uploaded_by, status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (
+                title,
+                file_name,
+                encrypted_file_name,
+                file_hash,
+                uploaded_by,
+                receiver_id,
+                status,
+                signed_by,
+                signed_at,
+                signature_hash,
+                sender_signed_by,
+                sender_signed_at,
+                sender_signature_hash
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), ?)
             `,
             [
-                title,
+                title.trim(),
                 originalFileName,
                 file.filename,
                 fileHash,
                 req.user.id,
-                "В работе"
+                receiver_id,
+                "В обработке",
+                req.user.id,
+                fileHash,
+                req.user.id,
+                fileHash
             ]
         );
 
         const documentId = insertResult.insertId;
 
-        for (const recipientId of recipientIds) {
-            await db.query(
-                `
-                INSERT INTO document_recipients (document_id, user_id)
-                VALUES (?, ?)
-                `,
-                [documentId, recipientId]
-            );
-        }
+        await createNotification(
+            receiver_id,
+            documentId,
+            `Вам поступил новый документ: ${title.trim()}`
+        );
 
         await db.query(
             "INSERT INTO logs (user_id, action) VALUES (?, ?)",
             [
                 req.user.id,
-                `Загрузка и шифрование документа: ${title}`
+                `Загрузка, подпись и отправка документа: ${title.trim()}`
             ]
         );
 
         res.status(201).json({
-            message: "Документ успешно загружен и зашифрован",
+            message: "Документ подписан отправителем и отправлен получателю",
             documentId,
             fileHash
         });
@@ -135,25 +236,45 @@ const getDocuments = async (req, res) => {
                 documents.file_name,
                 documents.encrypted_file_name,
                 documents.file_hash,
-                documents.signature_hash,
-                documents.signed_at,
-                documents.created_at,
                 documents.uploaded_by,
-                documents.signed_by,
-                documents.correction_of,
+                documents.receiver_id,
                 documents.status,
+                documents.created_at,
+                documents.signed_by,
+                documents.signed_at,
+                documents.signature_hash,
+                documents.sender_signed_by,
+                documents.sender_signed_at,
+                documents.sender_signature_hash,
+                documents.receiver_signed_by,
+                documents.receiver_signed_at,
+                documents.receiver_signature_hash,
+                documents.viewed_at,
+                documents.cancelled_at,
+                documents.cancelled_by,
+
                 authors.full_name AS full_name,
-                signers.full_name AS signed_user_name,
-                GROUP_CONCAT(recipients.full_name SEPARATOR ', ') AS recipients_names
+                authors.full_name AS author_name,
+                authors.email AS author_email,
+
+                receivers.full_name AS receiver_name,
+                receivers.email AS receiver_email,
+
+                senderUser.full_name AS sender_signed_name,
+                receiverUser.full_name AS receiver_signed_name,
+
+                cancelUser.full_name AS cancelled_user_name
             FROM documents
             LEFT JOIN users AS authors
                 ON documents.uploaded_by = authors.id
-            LEFT JOIN users AS signers
-                ON documents.signed_by = signers.id
-            LEFT JOIN document_recipients
-                ON documents.id = document_recipients.document_id
-            LEFT JOIN users AS recipients
-                ON document_recipients.user_id = recipients.id
+            LEFT JOIN users AS receivers
+                ON documents.receiver_id = receivers.id
+            LEFT JOIN users AS senderUser
+                ON documents.sender_signed_by = senderUser.id
+            LEFT JOIN users AS receiverUser
+                ON documents.receiver_signed_by = receiverUser.id
+            LEFT JOIN users AS cancelUser
+                ON documents.cancelled_by = cancelUser.id
         `;
 
         let params = [];
@@ -161,18 +282,13 @@ const getDocuments = async (req, res) => {
         if (req.user.role !== "admin") {
             query += `
                 WHERE documents.uploaded_by = ?
-                OR documents.id IN (
-                    SELECT document_id
-                    FROM document_recipients
-                    WHERE user_id = ?
-                )
+                OR documents.receiver_id = ?
             `;
 
             params = [req.user.id, req.user.id];
         }
 
         query += `
-            GROUP BY documents.id
             ORDER BY documents.created_at DESC
         `;
 
@@ -193,44 +309,85 @@ const getDocuments = async (req, res) => {
     }
 };
 
-const deleteDocument = async (req, res) => {
+const markDocumentViewed = async (req, res) => {
     try {
         const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
 
-        const [documents] = await db.query(
-            "SELECT * FROM documents WHERE id = ?",
-            [documentId]
-        );
-
-        if (documents.length === 0) {
+        if (!document) {
             return res.status(404).json({
                 message: "Документ не найден"
             });
         }
 
-        const document = documents[0];
+        const hasAccess = checkDocumentAccess(document, req.user);
 
-        if (document.signature_hash) {
+        if (!hasAccess) {
             return res.status(403).json({
-                message: "Документ подписан ЭЦП и не может быть удалён. Для внесения изменений необходимо создать исправление отдельным документом."
+                message: "Недостаточно прав для просмотра документа"
             });
         }
 
-        const hasAccess = await checkDocumentAccess(
-            documentId,
-            req.user.id,
-            req.user.role,
-            document.uploaded_by
-        );
-
-        if (!hasAccess) {
+        if (
+            Number(document.receiver_id) === Number(req.user.id) &&
+            document.status === "В обработке"
+        ) {
             await db.query(
-                "INSERT INTO logs (user_id, action) VALUES (?, ?)",
-                [req.user.id, `Попытка удаления чужого документа: ${document.title}`]
+                `
+                UPDATE documents
+                SET status = ?, viewed_at = NOW()
+                WHERE id = ?
+                `,
+                ["Просмотрен", documentId]
             );
 
+            await createNotification(
+                document.uploaded_by,
+                documentId,
+                `Получатель просмотрел документ: ${document.title}`
+            );
+
+            await db.query(
+                "INSERT INTO logs (user_id, action) VALUES (?, ?)",
+                [req.user.id, `Просмотр входящего документа: ${document.title}`]
+            );
+        }
+
+        res.json({
+            message: "Документ отмечен как просмотренный"
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            message: "Ошибка просмотра документа",
+            error: error.message
+        });
+    }
+};
+
+const deleteDocument = async (req, res) => {
+    try {
+        const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
+
+        if (!document) {
+            return res.status(404).json({
+                message: "Документ не найден"
+            });
+        }
+
+        if (document.status === "Подписан" || document.status === "Аннулирован") {
             return res.status(403).json({
-                message: "Недостаточно прав для удаления документа"
+                message: "Подписанный или аннулированный документ нельзя удалить"
+            });
+        }
+
+        if (
+            req.user.role !== "admin" &&
+            Number(document.uploaded_by) !== Number(req.user.id)
+        ) {
+            return res.status(403).json({
+                message: "Удалить документ может только отправитель или администратор"
             });
         }
 
@@ -269,26 +426,15 @@ const deleteDocument = async (req, res) => {
 const downloadDocument = async (req, res) => {
     try {
         const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
 
-        const [documents] = await db.query(
-            "SELECT * FROM documents WHERE id = ?",
-            [documentId]
-        );
-
-        if (documents.length === 0) {
+        if (!document) {
             return res.status(404).json({
                 message: "Документ не найден"
             });
         }
 
-        const document = documents[0];
-
-        const hasAccess = await checkDocumentAccess(
-            documentId,
-            req.user.id,
-            req.user.role,
-            document.uploaded_by
-        );
+        const hasAccess = checkDocumentAccess(document, req.user);
 
         if (!hasAccess) {
             await db.query(
@@ -301,27 +447,19 @@ const downloadDocument = async (req, res) => {
             });
         }
 
-        const filePath = path.join(
-            __dirname,
-            "../uploads",
-            document.encrypted_file_name
-        );
-
-        if (!fs.existsSync(filePath)) {
-            return res.status(404).json({
-                message: "Файл документа не найден"
+        if (document.status === "Аннулирован") {
+            return res.status(400).json({
+                message: "Аннулированный документ нельзя скачать"
             });
         }
 
-        const encryptedData = fs.readFileSync(filePath, "utf8");
+        const result = readAndDecryptFile(document);
 
-        const decryptedBytes = CryptoJS.AES.decrypt(
-            encryptedData,
-            process.env.AES_SECRET_KEY
-        );
-
-        const decryptedBase64 = decryptedBytes.toString(CryptoJS.enc.Utf8);
-        const fileBuffer = Buffer.from(decryptedBase64, "base64");
+        if (result.error) {
+            return res.status(404).json({
+                message: result.error
+            });
+        }
 
         await db.query(
             "INSERT INTO logs (user_id, action) VALUES (?, ?)",
@@ -338,7 +476,7 @@ const downloadDocument = async (req, res) => {
             "application/octet-stream"
         );
 
-        res.send(fileBuffer);
+        res.send(result.buffer);
 
     } catch (error) {
         res.status(500).json({
@@ -351,64 +489,31 @@ const downloadDocument = async (req, res) => {
 const verifyDocument = async (req, res) => {
     try {
         const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
 
-        const [documents] = await db.query(
-            "SELECT * FROM documents WHERE id = ?",
-            [documentId]
-        );
-
-        if (documents.length === 0) {
+        if (!document) {
             return res.status(404).json({
                 message: "Документ не найден"
             });
         }
 
-        const document = documents[0];
-
-        const hasAccess = await checkDocumentAccess(
-            documentId,
-            req.user.id,
-            req.user.role,
-            document.uploaded_by
-        );
+        const hasAccess = checkDocumentAccess(document, req.user);
 
         if (!hasAccess) {
-            await db.query(
-                "INSERT INTO logs (user_id, action) VALUES (?, ?)",
-                [req.user.id, `Попытка проверки чужого документа: ${document.title}`]
-            );
-
             return res.status(403).json({
                 message: "Недостаточно прав для проверки документа"
             });
         }
 
-        const filePath = path.join(
-            __dirname,
-            "../uploads",
-            document.encrypted_file_name
-        );
+        const result = readAndDecryptFile(document);
 
-        if (!fs.existsSync(filePath)) {
+        if (result.error) {
             return res.status(404).json({
-                message: "Файл документа не найден"
+                message: result.error
             });
         }
 
-        const encryptedData = fs.readFileSync(filePath, "utf8");
-
-        const decryptedBytes = CryptoJS.AES.decrypt(
-            encryptedData,
-            process.env.AES_SECRET_KEY
-        );
-
-        const decryptedBase64 = decryptedBytes.toString(CryptoJS.enc.Utf8);
-        const fileBuffer = Buffer.from(decryptedBase64, "base64");
-
-        const currentHash = crypto
-            .createHash("sha256")
-            .update(fileBuffer)
-            .digest("hex");
+        const currentHash = getHashFromBuffer(result.buffer);
 
         if (currentHash === document.file_hash) {
             await db.query(
@@ -445,26 +550,15 @@ const verifyDocument = async (req, res) => {
 const signDocument = async (req, res) => {
     try {
         const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
 
-        const [documents] = await db.query(
-            "SELECT * FROM documents WHERE id = ?",
-            [documentId]
-        );
-
-        if (documents.length === 0) {
+        if (!document) {
             return res.status(404).json({
                 message: "Документ не найден"
             });
         }
 
-        const document = documents[0];
-
-        const hasAccess = await checkDocumentAccess(
-            documentId,
-            req.user.id,
-            req.user.role,
-            document.uploaded_by
-        );
+        const hasAccess = checkDocumentAccess(document, req.user);
 
         if (!hasAccess) {
             return res.status(403).json({
@@ -472,41 +566,113 @@ const signDocument = async (req, res) => {
             });
         }
 
-        if (document.signature_hash) {
+        if (document.status === "Аннулирован") {
             return res.status(400).json({
-                message: "Документ уже подписан ЭЦП"
+                message: "Аннулированный документ нельзя подписать"
             });
         }
 
-        await db.query(
-            `
-            UPDATE documents
-            SET
-                signed_by = ?,
-                signed_at = NOW(),
-                signature_hash = ?,
-                status = ?
-            WHERE id = ?
-            `,
-            [
-                req.user.id,
-                document.file_hash,
-                "Подписан ЭЦП",
-                documentId
-            ]
-        );
+        if (document.status === "Подписан") {
+            return res.status(400).json({
+                message: "Документ уже подписан обеими сторонами"
+            });
+        }
 
-        await db.query(
-            "INSERT INTO logs (user_id, action) VALUES (?, ?)",
-            [
-                req.user.id,
-                `Подписание документа ЭЦП: ${document.title}`
-            ]
-        );
+        if (Number(req.user.id) === Number(document.uploaded_by)) {
+            if (document.sender_signature_hash) {
+                return res.status(400).json({
+                    message: "Отправитель уже подписал документ"
+                });
+            }
 
-        res.json({
-            message: "Документ успешно подписан ЭЦП",
-            signatureHash: document.file_hash
+            await db.query(
+                `
+                UPDATE documents
+                SET
+                    sender_signed_by = ?,
+                    sender_signed_at = NOW(),
+                    sender_signature_hash = ?,
+                    signed_by = ?,
+                    signed_at = NOW(),
+                    signature_hash = ?,
+                    status = ?
+                WHERE id = ?
+                `,
+                [
+                    req.user.id,
+                    document.file_hash,
+                    req.user.id,
+                    document.file_hash,
+                    "В обработке",
+                    documentId
+                ]
+            );
+
+            await createNotification(
+                document.receiver_id,
+                documentId,
+                `Вам поступил новый документ: ${document.title}`
+            );
+
+            await db.query(
+                "INSERT INTO logs (user_id, action) VALUES (?, ?)",
+                [req.user.id, `Подписание документа отправителем: ${document.title}`]
+            );
+
+            return res.json({
+                message: "Документ подписан отправителем и отправлен получателю"
+            });
+        }
+
+        if (Number(req.user.id) === Number(document.receiver_id)) {
+            if (!document.sender_signature_hash) {
+                return res.status(400).json({
+                    message: "Документ ещё не подписан отправителем"
+                });
+            }
+
+            if (document.receiver_signature_hash) {
+                return res.status(400).json({
+                    message: "Получатель уже подписал документ"
+                });
+            }
+
+            await db.query(
+                `
+                UPDATE documents
+                SET
+                    receiver_signed_by = ?,
+                    receiver_signed_at = NOW(),
+                    receiver_signature_hash = ?,
+                    status = ?
+                WHERE id = ?
+                `,
+                [
+                    req.user.id,
+                    document.file_hash,
+                    "Подписан",
+                    documentId
+                ]
+            );
+
+            await createNotification(
+                document.uploaded_by,
+                documentId,
+                `Документ подписан второй стороной: ${document.title}`
+            );
+
+            await db.query(
+                "INSERT INTO logs (user_id, action) VALUES (?, ?)",
+                [req.user.id, `Подписание документа получателем: ${document.title}`]
+            );
+
+            return res.json({
+                message: "Документ подписан второй стороной"
+            });
+        }
+
+        return res.status(403).json({
+            message: "Подписать документ может только отправитель или получатель"
         });
 
     } catch (error) {
@@ -520,32 +686,15 @@ const signDocument = async (req, res) => {
 const checkSignature = async (req, res) => {
     try {
         const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
 
-        const [documents] = await db.query(
-            `
-            SELECT documents.*, users.full_name
-            FROM documents
-            LEFT JOIN users
-            ON documents.signed_by = users.id
-            WHERE documents.id = ?
-            `,
-            [documentId]
-        );
-
-        if (documents.length === 0) {
+        if (!document) {
             return res.status(404).json({
                 message: "Документ не найден"
             });
         }
 
-        const document = documents[0];
-
-        const hasAccess = await checkDocumentAccess(
-            documentId,
-            req.user.id,
-            req.user.role,
-            document.uploaded_by
-        );
+        const hasAccess = checkDocumentAccess(document, req.user);
 
         if (!hasAccess) {
             return res.status(403).json({
@@ -553,64 +702,45 @@ const checkSignature = async (req, res) => {
             });
         }
 
-        if (!document.signature_hash) {
+        if (!document.sender_signature_hash) {
             return res.status(400).json({
-                message: "Документ не подписан ЭЦП"
+                message: "Документ ещё не подписан отправителем"
             });
         }
 
-        const filePath = path.join(
-            __dirname,
-            "../uploads",
-            document.encrypted_file_name
-        );
+        const result = readAndDecryptFile(document);
 
-        if (!fs.existsSync(filePath)) {
+        if (result.error) {
             return res.status(404).json({
-                message: "Файл документа не найден на сервере. Проверьте ЭЦП у документов, загруженных после публикации приложения."
+                message: result.error
             });
         }
 
-        const encryptedData = fs.readFileSync(filePath, "utf8");
+        const currentHash = getHashFromBuffer(result.buffer);
 
-        const decryptedBytes = CryptoJS.AES.decrypt(
-            encryptedData,
-            process.env.AES_SECRET_KEY
+        const senderValid = currentHash === document.sender_signature_hash;
+        const receiverValid = document.receiver_signature_hash
+            ? currentHash === document.receiver_signature_hash
+            : null;
+
+        await db.query(
+            "INSERT INTO logs (user_id, action) VALUES (?, ?)",
+            [
+                req.user.id,
+                `Проверка ЭЦП документа: ${document.title}`
+            ]
         );
 
-        const decryptedBase64 = decryptedBytes.toString(CryptoJS.enc.Utf8);
-
-        if (!decryptedBase64) {
-            return res.status(400).json({
-                message: "Не удалось расшифровать документ"
-            });
-        }
-
-        const fileBuffer = Buffer.from(decryptedBase64, "base64");
-
-        const currentHash = crypto
-            .createHash("sha256")
-            .update(fileBuffer)
-            .digest("hex");
-
-        if (currentHash === document.signature_hash) {
-            await db.query(
-                "INSERT INTO logs (user_id, action) VALUES (?, ?)",
-                [
-                    req.user.id,
-                    `Проверка ЭЦП документа: ${document.title}`
-                ]
-            );
-
-            return res.json({
-                message: "ЭЦП действительна",
-                signedBy: document.full_name,
-                signedAt: document.signed_at
-            });
-        }
-
-        return res.status(409).json({
-            message: "ЭЦП недействительна"
+        return res.json({
+            message: senderValid && (receiverValid === true || receiverValid === null)
+                ? "ЭЦП действительна"
+                : "ЭЦП недействительна",
+            senderValid,
+            receiverValid,
+            senderSignedBy: document.sender_signed_name,
+            senderSignedAt: document.sender_signed_at,
+            receiverSignedBy: document.receiver_signed_name,
+            receiverSignedAt: document.receiver_signed_at
         });
 
     } catch (error) {
@@ -626,34 +756,15 @@ const checkSignature = async (req, res) => {
 const viewStampedDocument = async (req, res) => {
     try {
         const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
 
-        const [documents] = await db.query(
-            `
-            SELECT 
-                documents.*,
-                users.full_name AS signed_user_name,
-                users.role AS signed_user_role
-            FROM documents
-            LEFT JOIN users ON documents.signed_by = users.id
-            WHERE documents.id = ?
-            `,
-            [documentId]
-        );
-
-        if (documents.length === 0) {
+        if (!document) {
             return res.status(404).json({
                 message: "Документ не найден"
             });
         }
 
-        const document = documents[0];
-
-        const hasAccess = await checkDocumentAccess(
-            documentId,
-            req.user.id,
-            req.user.role,
-            document.uploaded_by
-        );
+        const hasAccess = checkDocumentAccess(document, req.user);
 
         if (!hasAccess) {
             return res.status(403).json({
@@ -661,26 +772,39 @@ const viewStampedDocument = async (req, res) => {
             });
         }
 
-        if (!document.signature_hash) {
+        if (!document.sender_signature_hash) {
             return res.status(400).json({
                 message: "Документ ещё не подписан ЭЦП"
             });
         }
 
-        const roleName =
-            document.signed_user_role === "admin"
-                ? "Администратор"
-                : "Сотрудник";
+        const formatDate = (date) => {
+            return date ? new Date(date).toLocaleString("ru-RU") : "—";
+        };
 
-        const signedDate =
-            new Date(document.signed_at).toLocaleString("ru-RU");
+        const receiverBlock = document.receiver_signature_hash
+            ? `
+                <div class="signature">
+                    <div class="signature-title">ЭЦП получателя</div>
+                    <div class="row"><b>ФИО подписанта:</b> ${document.receiver_signed_name || "—"}</div>
+                    <div class="row"><b>Дата подписания:</b> ${formatDate(document.receiver_signed_at)}</div>
+                    <div class="row"><b>Hash подписи:</b></div>
+                    <div class="hash">${document.receiver_signature_hash}</div>
+                </div>
+            `
+            : `
+                <div class="signature waiting">
+                    <div class="signature-title">ЭЦП получателя</div>
+                    <div class="row">Документ ожидает подписи получателя.</div>
+                </div>
+            `;
 
         const html = `
         <!DOCTYPE html>
         <html lang="ru">
         <head>
             <meta charset="UTF-8">
-            <title>Документ с электронной подписью</title>
+            <title>Документ с электронными подписями</title>
             <style>
                 body {
                     font-family: Arial, sans-serif;
@@ -690,7 +814,7 @@ const viewStampedDocument = async (req, res) => {
                 }
 
                 .page {
-                    max-width: 850px;
+                    max-width: 900px;
                     margin: 0 auto;
                     background: white;
                     padding: 35px;
@@ -707,7 +831,7 @@ const viewStampedDocument = async (req, res) => {
                     border: 1px solid #d1d5db;
                     border-radius: 14px;
                     padding: 20px;
-                    margin-bottom: 30px;
+                    margin-bottom: 25px;
                     background: #f9fafb;
                 }
 
@@ -716,6 +840,12 @@ const viewStampedDocument = async (req, res) => {
                     border-radius: 18px;
                     padding: 25px;
                     background: #eff6ff;
+                    margin-bottom: 20px;
+                }
+
+                .waiting {
+                    border-color: #f59e0b;
+                    background: #fffbeb;
                 }
 
                 .signature-title {
@@ -750,29 +880,29 @@ const viewStampedDocument = async (req, res) => {
         </head>
         <body>
             <div class="page">
-                <h1>Документ с электронной подписью</h1>
+                <h1>Документ с электронными подписями</h1>
 
                 <div class="document-info">
                     <div class="row"><b>Название документа:</b> ${document.title}</div>
                     <div class="row"><b>Файл:</b> ${document.file_name}</div>
-                    <div class="row"><b>Дата загрузки:</b> ${new Date(document.created_at).toLocaleString("ru-RU")}</div>
+                    <div class="row"><b>Автор:</b> ${document.author_name || "—"}</div>
+                    <div class="row"><b>Получатель:</b> ${document.receiver_name || "—"}</div>
+                    <div class="row"><b>Статус:</b> ${document.status}</div>
+                    <div class="row"><b>Дата загрузки:</b> ${formatDate(document.created_at)}</div>
                 </div>
 
                 <div class="signature">
-                    <div class="signature-title">
-                        Документ подписан простой электронной подписью
-                    </div>
-
-                    <div class="row"><b>ФИО подписанта:</b> ${document.signed_user_name}</div>
-                    <div class="row"><b>Должность/роль:</b> ${roleName}</div>
-                    <div class="row"><b>Дата подписания:</b> ${signedDate}</div>
-
-                    <div class="row"><b>Уникальный ключ электронной подписи:</b></div>
-                    <div class="hash">${document.signature_hash}</div>
+                    <div class="signature-title">ЭЦП отправителя</div>
+                    <div class="row"><b>ФИО подписанта:</b> ${document.sender_signed_name || "—"}</div>
+                    <div class="row"><b>Дата подписания:</b> ${formatDate(document.sender_signed_at)}</div>
+                    <div class="row"><b>Hash подписи:</b></div>
+                    <div class="hash">${document.sender_signature_hash}</div>
                 </div>
 
+                ${receiverBlock}
+
                 <div class="footer">
-                    Электронная подпись сформирована системой защищённого документооборота Secure DocFlow.
+                    Электронные подписи сформированы системой защищённого документооборота Secure DocFlow.
                 </div>
             </div>
         </body>
@@ -798,118 +928,107 @@ const viewStampedDocument = async (req, res) => {
     }
 };
 
-const createCorrection = async (req, res) => {
+const cancelDocument = async (req, res) => {
     try {
-        const originalDocumentId = req.params.id;
-        const file = req.files && req.files[0];
-        const { title, recipients } = req.body;
+        const documentId = req.params.id;
+        const document = await getDocumentById(documentId);
 
-        if (!file) {
-            return res.status(400).json({
-                message: "Файл исправления не загружен"
-            });
-        }
-
-        if (!title) {
-            return res.status(400).json({
-                message: "Введите название исправления"
-            });
-        }
-
-        const [originalDocuments] = await db.query(
-            "SELECT * FROM documents WHERE id = ?",
-            [originalDocumentId]
-        );
-
-        if (originalDocuments.length === 0) {
+        if (!document) {
             return res.status(404).json({
-                message: "Исходный документ не найден"
+                message: "Документ не найден"
             });
         }
 
-        const originalDocument = originalDocuments[0];
+        const canCancel =
+            req.user.role === "admin" ||
+            Number(req.user.id) === Number(document.uploaded_by) ||
+            Number(req.user.id) === Number(document.receiver_id);
 
-        const hasAccess = await checkDocumentAccess(
-            originalDocumentId,
-            req.user.id,
-            req.user.role,
-            originalDocument.uploaded_by
-        );
-
-        if (!hasAccess) {
+        if (!canCancel) {
             return res.status(403).json({
-                message: "Недостаточно прав для создания исправления"
+                message: "Аннулировать документ может только отправитель, получатель или администратор"
             });
         }
 
-        if (!originalDocument.signature_hash) {
+        if (document.status === "Аннулирован") {
             return res.status(400).json({
-                message: "Исправление создаётся только для подписанного ЭЦП документа"
+                message: "Документ уже аннулирован"
             });
-        }
-
-        const filePath = path.join(__dirname, "../uploads", file.filename);
-        const fileBuffer = fs.readFileSync(filePath);
-
-        const fileHash = crypto
-            .createHash("sha256")
-            .update(fileBuffer)
-            .digest("hex");
-
-        const encryptedData = CryptoJS.AES.encrypt(
-            fileBuffer.toString("base64"),
-            process.env.AES_SECRET_KEY
-        ).toString();
-
-        fs.writeFileSync(filePath, encryptedData);
-
-        const originalFileName = getOriginalFileName(file.originalname);
-
-        const [insertResult] = await db.query(
-            `
-            INSERT INTO documents
-            (title, file_name, encrypted_file_name, file_hash, uploaded_by, correction_of, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            `,
-            [
-                title,
-                originalFileName,
-                file.filename,
-                fileHash,
-                req.user.id,
-                originalDocumentId,
-                "Исправление"
-            ]
-        );
-
-        const newDocumentId = insertResult.insertId;
-        const recipientIds = parseRecipients(recipients);
-
-        for (const recipientId of recipientIds) {
-            await db.query(
-                `
-                INSERT INTO document_recipients (document_id, user_id)
-                VALUES (?, ?)
-                `,
-                [newDocumentId, recipientId]
-            );
         }
 
         await db.query(
-            "INSERT INTO logs (user_id, action) VALUES (?, ?)",
-            [
-                req.user.id,
-                `Создание исправления к документу: ${originalDocument.title}`
-            ]
+            `
+            UPDATE documents
+            SET status = ?, cancelled_at = NOW(), cancelled_by = ?
+            WHERE id = ?
+            `,
+            ["Аннулирован", req.user.id, documentId]
         );
 
-        res.status(201).json({
-            message: "Исправление создано как отдельный документ"
+        const otherUserId =
+            Number(req.user.id) === Number(document.uploaded_by)
+                ? document.receiver_id
+                : document.uploaded_by;
+
+        await createNotification(
+            otherUserId,
+            documentId,
+            `Документ аннулирован: ${document.title}`
+        );
+
+        await db.query(
+            "INSERT INTO logs (user_id, action) VALUES (?, ?)",
+            [req.user.id, `Аннулирование документа: ${document.title}`]
+        );
+
+        res.json({
+            message: "Документ аннулирован"
         });
 
     } catch (error) {
         res.status(500).json({
-            message: "Ошибка создания исправления",
+            message: "Ошибка аннулирования документа",
+            error: error.message
+        });
+    }
+};
+
+const getNotifications = async (req, res) => {
+    try {
+        const [notifications] = await db.query(
+            `
+            SELECT *
+            FROM notifications
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            `,
+            [req.user.id]
+        );
+
+        res.json(notifications);
+
+    } catch (error) {
+        res.status(500).json({
+            message: "Ошибка получения уведомлений",
+            error: error.message
+        });
+    }
+};
+
+const markNotificationsRead = async (req, res) => {
+    try {
+        await db.query(
+            "UPDATE notifications SET is_read = 1 WHERE user_id = ?",
+            [req.user.id]
+        );
+
+        res.json({
+            message: "Уведомления прочитаны"
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            message: "Ошибка обновления уведомлений",
             error: error.message
         });
     }
@@ -924,5 +1043,8 @@ module.exports = {
     signDocument,
     checkSignature,
     viewStampedDocument,
-    createCorrection
+    cancelDocument,
+    markDocumentViewed,
+    getNotifications,
+    markNotificationsRead
 };
