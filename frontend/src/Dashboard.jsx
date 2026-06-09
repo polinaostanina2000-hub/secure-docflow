@@ -635,12 +635,14 @@ function Dashboard() {
                                         <td style={styles.td}>{doc.receiver_signed_name || "—"}</td>
 
                                         <td style={styles.td}>
-                                            <button
-                                                style={styles.actionButton}
-                                                onClick={() => downloadDocument(doc)}
-                                            >
-                                                Скачать
-                                            </button>
+                                            {doc.status !== "Аннулирован" && (
+    <button
+        style={styles.actionButton}
+        onClick={() => downloadDocument(doc)}
+    >
+        Скачать
+    </button>
+)}
 
                                             {canSenderSign(doc) && (
                                                 <button
