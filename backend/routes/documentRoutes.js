@@ -13,7 +13,10 @@ const {
     signDocument,
     checkSignature,
     viewStampedDocument,
-    createCorrection
+    cancelDocument,
+    markDocumentViewed,
+    getNotifications,
+    markNotificationsRead
 } = require("../controllers/documentController");
 
 const storage = multer.diskStorage({
@@ -79,10 +82,27 @@ router.get(
 );
 
 router.post(
-    "/correction/:id",
+    "/cancel/:id",
     authMiddleware,
-    upload.any(),
-    createCorrection
+    cancelDocument
+);
+
+router.post(
+    "/view/:id",
+    authMiddleware,
+    markDocumentViewed
+);
+
+router.get(
+    "/notifications",
+    authMiddleware,
+    getNotifications
+);
+
+router.post(
+    "/notifications/read",
+    authMiddleware,
+    markNotificationsRead
 );
 
 module.exports = router;

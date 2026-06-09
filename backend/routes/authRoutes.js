@@ -10,10 +10,48 @@ const {
 const authMiddleware = require("../middleware/authMiddleware");
 const db = require("../config/db");
 
+const fullNameRegex = /^[А-Яа-яЁёA-Za-z\s-]+$/;
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const validateUserFields = (full_name, email, password, isPasswordRequired = true) => {
+    if (!full_name || !email || (isPasswordRequired && !password)) {
+        return "Заполните все обязательные поля";
+    }
+
+    if (!fullNameRegex.test(full_name.trim())) {
+        return "ФИО может содержать только буквы, пробелы и дефис";
+    }
+
+    if (!emailRegex.test(email.trim())) {
+        return "Некорректный email. Email должен содержать @ и домен";
+    }
+
+    if (isPasswordRequired && password.trim().length < 3) {
+        return "Пароль должен содержать минимум 3 символа";
+    }
+
+    return null;
+};
+
 router.post("/register", authMiddleware, async (req, res, next) => {
     if (req.user.role !== "admin") {
         return res.status(403).json({
             message: "Создавать пользователей может только администратор"
+        });
+    }
+
+    const { full_name, email, password } = req.body;
+
+    const validationError = validateUserFields(
+        full_name,
+        email,
+        password,
+        true
+    );
+
+    if (validationError) {
+        return res.status(400).json({
+            message: validationError
         });
     }
 
@@ -28,6 +66,7 @@ router.get("/profile", authMiddleware, (req, res) => {
         user: req.user
     });
 });
+
 router.get("/recipients", authMiddleware, async (req, res) => {
     try {
         const [users] = await db.query(
@@ -48,7 +87,8 @@ router.get("/recipients", authMiddleware, async (req, res) => {
             error: error.message
         });
     }
-}); 
+});
+
 router.get("/logs", authMiddleware, async (req, res) => {
     if (req.user.role !== "admin") {
         return res.status(403).json({
@@ -103,6 +143,7 @@ router.get("/users", authMiddleware, async (req, res) => {
         });
     }
 });
+
 router.put("/users/:id", authMiddleware, async (req, res) => {
     if (req.user.role !== "admin") {
         return res.status(403).json({
@@ -114,14 +155,42 @@ router.put("/users/:id", authMiddleware, async (req, res) => {
         const userId = req.params.id;
         const { full_name, email, role, password } = req.body;
 
-        if (!full_name || !email || !role) {
+        const validationError = validateUserFields(
+            full_name,
+            email,
+            password,
+            false
+        );
+
+        if (validationError) {
             return res.status(400).json({
-                message: "Заполните ФИО, email и роль"
+                message: validationError
             });
         }
 
-        if (password) {
-            const hashedPassword = await bcrypt.hash(password, 10);
+        const [existingUsers] = await db.query(
+            `
+            SELECT id
+            FROM users
+            WHERE email = ? AND id != ?
+            `,
+            [email.trim(), userId]
+        );
+
+        if (existingUsers.length > 0) {
+            return res.status(400).json({
+                message: "Пользователь с таким email уже существует"
+            });
+        }
+
+        if (password && password.trim()) {
+            if (password.trim().length < 3) {
+                return res.status(400).json({
+                    message: "Пароль должен содержать минимум 3 символа"
+                });
+            }
+
+            const hashedPassword = await bcrypt.hash(password.trim(), 10);
 
             await db.query(
                 `
@@ -129,7 +198,13 @@ router.put("/users/:id", authMiddleware, async (req, res) => {
                 SET full_name = ?, email = ?, role = ?, password = ?
                 WHERE id = ?
                 `,
-                [full_name, email, role, hashedPassword, userId]
+                [
+                    full_name.trim(),
+                    email.trim(),
+                    role,
+                    hashedPassword,
+                    userId
+                ]
             );
         } else {
             await db.query(
@@ -138,7 +213,12 @@ router.put("/users/:id", authMiddleware, async (req, res) => {
                 SET full_name = ?, email = ?, role = ?
                 WHERE id = ?
                 `,
-                [full_name, email, role, userId]
+                [
+                    full_name.trim(),
+                    email.trim(),
+                    role,
+                    userId
+                ]
             );
         }
 
@@ -169,7 +249,7 @@ router.delete("/users/:id", authMiddleware, async (req, res) => {
     try {
         const userId = req.params.id;
 
-        if (Number(userId) === req.user.id) {
+        if (Number(userId) === Number(req.user.id)) {
             return res.status(400).json({
                 message: "Нельзя удалить самого себя"
             });
