@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const multer = require("multer");
+const path = require("path");
 const authMiddleware = require("../middleware/authMiddleware");
 
 const {
@@ -25,9 +26,10 @@ const storage = multer.diskStorage({
     },
 
     filename: (req, file, cb) => {
-        const uniqueName = Date.now() + "-" + file.originalname;
-        cb(null, uniqueName);
-    }
+    const ext = path.extname(file.originalname);
+    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    cb(null, uniqueName);
+}
 });
 
 const upload = multer({ storage });
