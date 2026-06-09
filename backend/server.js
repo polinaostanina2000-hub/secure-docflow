@@ -2,12 +2,21 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 
+const fs = require("fs");
+const path = require("path");
+
 const db = require("./config/db");
 
 const authRoutes = require("./routes/authRoutes");
 const documentRoutes = require("./routes/documentRoutes");
 
 const app = express();
+
+const uploadsPath = path.join(__dirname, "uploads");
+
+if (!fs.existsSync(uploadsPath)) {
+    fs.mkdirSync(uploadsPath);
+}
 
 app.use(cors({
     origin: process.env.CLIENT_URL || "*",
